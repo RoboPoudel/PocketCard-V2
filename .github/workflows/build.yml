@@ -15,21 +15,65 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Installs Gradle directly, so gradle-wrapper.jar is not needed
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
 
-      - name: Build APK
+      - name: Check project files
+        id: check
         run: |
           SETTINGS=$(find . -name settings.gradle.kts -type f | head -n 1)
           if [ -z "$SETTINGS" ]; then
-            echo "settings.gradle.kts was not found. Please upload the project files."
+            echo "### settings.gradle.kts not found – project files are missing" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          cd "$(dirname "$SETTINGS")"
-          echo "Building in: $(pwd)"
-          gradle assembleRelease --stacktrace
+          DIR=$(dirname "$SETTINGS")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          cd "$DIR"
+          MISSING=""
+          for f in build.gradle.kts gradle.properties app/build.gradle.kts \
+                   app/src/main/AndroidManifest.xml \
+                   app/src/main/res/values/strings.xml \
+                   app/src/main/res/values/themes.xml \
+                   app/src/main/res/xml/file_paths.xml \
+                   app/src/main/res/xml/locales_config.xml \
+                   app/src/main/res/xml/cards_widget_info.xml \
+                   app/src/main/res/drawable-nodpi/logo_art.png \
+                   app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
+                   app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml \
+                   app/src/main/java/com/pocketcards/app/MainActivity.kt; do
+            [ -f "$f" ] || MISSING="$MISSING $f"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "### These files are missing from the repository" >> "$GITHUB_STEP_SUMMARY"
+            for f in $MISSING; do echo "- $f" >> "$GITHUB_STEP_SUMMARY"; done
+            exit 1
+          fi
+          if [ ! -f app/pocketcards.keystore ]; then
+            echo "### Note: app/pocketcards.keystore was missing, a temporary key was created" >> "$GITHUB_STEP_SUMMARY"
+            keytool -genkeypair -keystore app/pocketcards.keystore -alias pocketcards \
+              -keyalg RSA -keysize 2048 -validity 36500 \
+              -storepass pocketcards2026 -keypass pocketcards2026 -dname "CN=Pocket Cards"
+          fi
+
+      - name: Build APK
+        working-directory: ${{ steps.check.outputs.dir }}
+        run: |
+          set -o pipefail
+          gradle assembleRelease --console=plain 2>&1 | tee build.log
+
+      - name: Show the error
+        if: failure()
+        working-directory: ${{ steps.check.outputs.dir }}
+        run: |
+          [ -f build.log ] || exit 0
+          {
+            echo "### Build errors"
+            echo '```'
+            grep -E "^e: " build.log | head -n 40
+            grep -A 8 "What went wrong" build.log | head -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
